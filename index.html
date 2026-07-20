@@ -1889,7 +1889,6 @@ const ReasonPrompt = {
 /* =========================================================
    نظام صلاحيات المدير (Admin)
 ========================================================= */
-const ADMIN_USERNAME = 'Ahmedelkmash';
 const SESSION_TIMEOUT_MS = 15*60*1000; // تسجيل خروج تلقائي بعد 15 دقيقة بدون استخدام
 const LOCKOUT_MS = 5*60*1000;          // قفل 5 دقايق بعد محاولات فاشلة
 const MAX_ATTEMPTS = 5;
@@ -1999,9 +1998,11 @@ const Admin = {
       return;
     }
     if(!this.isConfigured()){
-      title.textContent = 'أول استخدام: تحديد كلمة مرور المدير';
+      title.textContent = 'أول استخدام: تحديد بيانات المدير';
       body.innerHTML = `
-        <p style="font-size:13px;color:var(--text-muted);margin-top:0;">اسم المستخدم الافتراضي: <b>${ADMIN_USERNAME}</b>. حدد كلمة مرور المدير، هتحتاجها لأي تعديل مهم بعد كده.</p>
+        <p style="font-size:13px;color:var(--text-muted);margin-top:0;">اختار اسم مستخدم وكلمة مرور للمدير، هتحتاجهم لأي تعديل مهم بعد كده.</p>
+        <label>اسم المستخدم</label>
+        <input type="text" id="admin_setup_username" placeholder="اكتب اسم المستخدم اللي عايزه">
         <label>كلمة المرور</label>
         <input type="password" id="admin_pw1" placeholder="4 حروف أو أرقام على الأقل">
         <label>تأكيد كلمة المرور</label>
@@ -2029,23 +2030,25 @@ const Admin = {
     this._pendingAction = null;
   },
   async setupPassword(){
+    const username = document.getElementById('admin_setup_username').value.trim();
     const p1 = document.getElementById('admin_pw1').value;
     const p2 = document.getElementById('admin_pw2').value;
+    if(!username || username.length<3){ toast('اسم المستخدم لازم يكون 3 حروف على الأقل'); return; }
     if(!p1 || p1.length<4){ toast('كلمة المرور لازم تكون 4 حروف/أرقام على الأقل'); return; }
     if(p1!==p2){ toast('كلمتا المرور مش متطابقتين'); return; }
     const salt = randomSaltHex();
     const hash = await hashPassword(p1, salt);
-    this.saveRecord({username:ADMIN_USERNAME, salt, hash, failedAttempts:0, lockUntil:0});
-    
+    this.saveRecord({username, salt, hash, failedAttempts:0, lockUntil:0});
+
     const users = DB.get('raa_admin_users', []);
-    if(!users.some(u => u.username.toLowerCase() === ADMIN_USERNAME.toLowerCase())){
-      users.push({username:ADMIN_USERNAME, salt, hash});
+    if(!users.some(u => u.username.toLowerCase() === username.toLowerCase())){
+      users.push({username, salt, hash});
       DB.set('raa_admin_users', users);
       Cloud.saveGeneric('admin_users', users);
     }
 
-    this.session = {active:true, username:ADMIN_USERNAME, expiresAt: Date.now()+SESSION_TIMEOUT_MS};
-    AuditLog.add('إنشاء حساب المدير', null, {username:ADMIN_USERNAME}, '');
+    this.session = {active:true, username, expiresAt: Date.now()+SESSION_TIMEOUT_MS};
+    AuditLog.add('إنشاء حساب المدير', null, {username}, '');
     const act = this._pendingAction;
     this.closeModal(); this.renderBar();
     toast('تم حفظ كلمة المرور وتسجيل الدخول');
@@ -2056,13 +2059,14 @@ const Admin = {
     const pw = document.getElementById('admin_pw').value;
     if(!username || !pw){ toast('املا الحقول من فضلك'); return; }
 
-    let userRecord = null;
+    const legacy = this.record();
+    let userRecord = null, isLegacy = false;
     const users = DB.get('raa_admin_users', []);
     const match = users.find(u => u.username.toLowerCase() === username.toLowerCase());
     if(match){
       userRecord = match;
-    } else if(username.toLowerCase() === ADMIN_USERNAME.toLowerCase()){
-      userRecord = this.record();
+    } else if(legacy && legacy.username && legacy.username.toLowerCase() === username.toLowerCase()){
+      userRecord = legacy; isLegacy = true;
     }
 
     if(!userRecord){
@@ -2070,12 +2074,14 @@ const Admin = {
       return;
     }
 
+    if(isLegacy && legacy.lockUntil && Date.now() < legacy.lockUntil){
+      toast('الحساب مقفول مؤقتًا، حاول تاني بعد ' + Math.ceil((legacy.lockUntil-Date.now())/1000) + ' ثانية');
+      return;
+    }
+
     const hash = await hashPassword(pw, userRecord.salt);
     if(hash === userRecord.hash){
-      if(username.toLowerCase() === ADMIN_USERNAME.toLowerCase()){
-        const r = this.record();
-        if(r){ r.failedAttempts = 0; r.lockUntil = 0; this.saveRecord(r); }
-      }
+      if(isLegacy){ legacy.failedAttempts = 0; legacy.lockUntil = 0; this.saveRecord(legacy); }
       this.session = {active:true, username:userRecord.username, expiresAt: Date.now()+SESSION_TIMEOUT_MS};
       const act = this._pendingAction;
       this.closeModal(); this.renderBar();
@@ -2083,20 +2089,15 @@ const Admin = {
       if(act) act();
       if(document.getElementById('view-settings').classList.contains('active')) Settings.fillForm();
     } else {
-      if(username.toLowerCase() === ADMIN_USERNAME.toLowerCase()){
-        const r = this.record();
-        if(r){
-          r.failedAttempts = (r.failedAttempts||0)+1;
-          if(r.failedAttempts >= MAX_ATTEMPTS){
-            r.lockUntil = Date.now() + LOCKOUT_MS; r.failedAttempts = 0; this.saveRecord(r);
-            toast('كلمة مرور غلط عدة مرات، الحساب اتقفل 5 دقايق');
-            this.closeModal();
-          } else {
-            this.saveRecord(r);
-            toast(`كلمة مرور غلط (محاولة ${r.failedAttempts} من ${MAX_ATTEMPTS})`);
-          }
+      if(isLegacy){
+        legacy.failedAttempts = (legacy.failedAttempts||0)+1;
+        if(legacy.failedAttempts >= MAX_ATTEMPTS){
+          legacy.lockUntil = Date.now() + LOCKOUT_MS; legacy.failedAttempts = 0; this.saveRecord(legacy);
+          toast('كلمة مرور غلط عدة مرات، الحساب اتقفل 5 دقايق');
+          this.closeModal();
         } else {
-          toast('كلمة المرور غير صحيحة');
+          this.saveRecord(legacy);
+          toast(`كلمة مرور غلط (محاولة ${legacy.failedAttempts} من ${MAX_ATTEMPTS})`);
         }
       } else {
         toast('كلمة المرور غير صحيحة');
@@ -2112,7 +2113,8 @@ const Admin = {
     if(pw.length < 4){ toast('كلمة المرور لا تقل عن 4 حروف'); return; }
     
     const users = DB.get('raa_admin_users', []);
-    if(users.some(u => u.username.toLowerCase() === user.toLowerCase()) || user.toLowerCase() === ADMIN_USERNAME.toLowerCase()){
+    const legacy = this.record();
+    if(users.some(u => u.username.toLowerCase() === user.toLowerCase()) || (legacy && legacy.username && legacy.username.toLowerCase() === user.toLowerCase())){
       toast('اسم المستخدم ده مسجل قبل كده');
       return;
     }
